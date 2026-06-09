@@ -71,3 +71,42 @@ class UserResponse(BaseModel):
 
 class UserCreateResponse(UserResponse):
     generated_password: str
+
+
+# ==================== PRODUCT SCHEMAS ====================
+
+class ProductBase(BaseModel):
+    product_name: str
+    product_category: str
+    product_price: float
+    initial_stock: int
+
+class ProductCreate(ProductBase):
+    product_photo: Optional[str] = None
+
+class ProductUpdate(BaseModel):
+    product_name: Optional[str] = None
+    product_category: Optional[str] = None
+    product_price: Optional[float] = None
+    initial_stock: Optional[int] = None
+    product_photo: Optional[str] = None
+
+class ProductResponse(ProductBase):
+    id: int
+    product_photo: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    @computed_field
+    @property
+    def stock_status(self) -> str:
+        """Calculate stock status based on initial_stock"""
+        if self.initial_stock == 0:
+            return "Out of Stock"
+        elif self.initial_stock < 10:
+            return "Low Stock"
+        else:
+            return "In Stock"
+
+    class Config:
+        from_attributes = True

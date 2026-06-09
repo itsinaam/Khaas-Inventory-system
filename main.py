@@ -1,11 +1,11 @@
 import asyncio
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 from database import engine, get_db
 from auth import create_access_token, decode_access_token, generate_password, hash_password, verify_password
-from models import Base, Inventory, User
+from models import Base, Inventory, User, Product
 from schemas import (
 	InventoryCreate,
 	InventoryResponse,
@@ -15,8 +15,12 @@ from schemas import (
 	UserCreateRequest,
 	UserCreateResponse,
 	UserResponse,
+	ProductCreate,
+	ProductResponse,
+	ProductUpdate,
 )
-from typing import List
+from typing import List, Optional
+from supabase_service import upload_product_image, delete_product_image, get_content_type
 
 app = FastAPI(title="Khaas Inventory Management API", version="1.0.0")
 
@@ -286,3 +290,218 @@ async def get_inventory_overview_stats(
 		"daily_valuation": round(daily_valuation, 2)
 	}
 
+
+# ==================== PRODUCT CRUD ENDPOINTS ====================
+
+@app.post("/products", response_model=ProductResponse, status_code=201)
+async def create_product(
+	product_name: str = Form(...),
+	product_category: str = Form(...),
+	product_price: float = Form(...),
+	initial_stock: int = Form(...),
+	product_photo: Optional[UploadFile] = File(None),
+	db: Session = Depends(get_db),
+	current_admin: User = Depends(get_admin_user),
+):
+	"""Create a new product with optional image upload"""
+	_ = current_admin
+	
+	# Handle image upload if provided
+	image_url = None
+	if product_photo:
+		try:
+			# Read file content
+			file_content = await product_photo.read()
+			
+			# Determine content type
+			content_type = get_content_type(product_photo.filename)
+			
+			# Upload to Supabase
+			image_url = upload_product_image(file_content, product_photo.filename, content_type)
+		except Exception as e:
+			raise HTTPException(
+				status_code=500,
+				detail=f"Failed to upload image: {str(e)}"
+			)
+	
+	# Create product in database
+	db_product = Product(
+		product_name=product_name,
+		product_category=product_category,
+		product_price=product_price,
+		initial_stock=initial_stock,
+		product_photo=image_url
+	)
+	
+	db.add(db_product)
+	db.commit()
+	db.refresh(db_product)
+	
+	return db_product
+
+
+@app.get("/products", response_model=List[ProductResponse])
+async def get_all_products(
+	skip: int = 0,
+	limit: int = 100,
+	category: Optional[str] = None,
+	search: Optional[str] = None,
+	min_price: Optional[float] = None,
+	max_price: Optional[float] = None,
+	min_stock: Optional[int] = None,
+	max_stock: Optional[int] = None,
+	sort_by: Optional[str] = None,  # Options: name, price, stock, created_at
+	sort_order: Optional[str] = "asc",  # Options: asc, desc
+	db: Session = Depends(get_db),
+	current_admin: User = Depends(get_admin_user),
+):
+	"""
+	Get all products with advanced filtering options:
+	- category: Filter by product category
+	- search: Search by product name (partial match)
+	- min_price/max_price: Filter by price range
+	- min_stock/max_stock: Filter by stock range
+	- sort_by: Sort by name, price, stock, or created_at
+	- sort_order: asc or desc
+	"""
+	_ = current_admin
+	
+	query = db.query(Product)
+	
+	# Filter by category
+	if category:
+		query = query.filter(Product.product_category == category)
+	
+	# Search by product name
+	if search:
+		query = query.filter(Product.product_name.ilike(f"%{search}%"))
+	
+	# Filter by price range
+	if min_price is not None:
+		query = query.filter(Product.product_price >= min_price)
+	if max_price is not None:
+		query = query.filter(Product.product_price <= max_price)
+	
+	# Filter by stock range
+	if min_stock is not None:
+		query = query.filter(Product.initial_stock >= min_stock)
+	if max_stock is not None:
+		query = query.filter(Product.initial_stock <= max_stock)
+	
+	# Sorting
+	if sort_by:
+		if sort_by == "name":
+			order_column = Product.product_name
+		elif sort_by == "price":
+			order_column = Product.product_price
+		elif sort_by == "stock":
+			order_column = Product.initial_stock
+		elif sort_by == "created_at":
+			order_column = Product.created_at
+		else:
+			order_column = Product.id
+		
+		if sort_order == "desc":
+			query = query.order_by(order_column.desc())
+		else:
+			query = query.order_by(order_column.asc())
+	else:
+		query = query.order_by(Product.id.desc())
+	
+	products = query.offset(skip).limit(limit).all()
+	return products
+
+
+@app.get("/products/{product_id}", response_model=ProductResponse)
+async def get_product(
+	product_id: int,
+	db: Session = Depends(get_db),
+	current_admin: User = Depends(get_admin_user),
+):
+	"""Get a specific product by ID"""
+	_ = current_admin
+	
+	db_product = db.query(Product).filter(Product.id == product_id).first()
+	
+	if not db_product:
+		raise HTTPException(status_code=404, detail="Product not found")
+	
+	return db_product
+
+
+@app.put("/products/{product_id}", response_model=ProductResponse)
+async def update_product(
+	product_id: int,
+	product_name: Optional[str] = Form(None),
+	product_category: Optional[str] = Form(None),
+	product_price: Optional[float] = Form(None),
+	initial_stock: Optional[int] = Form(None),
+	product_photo: Optional[UploadFile] = File(None),
+	db: Session = Depends(get_db),
+	current_admin: User = Depends(get_admin_user),
+):
+	"""Update a product with optional new image"""
+	_ = current_admin
+	
+	db_product = db.query(Product).filter(Product.id == product_id).first()
+	
+	if not db_product:
+		raise HTTPException(status_code=404, detail="Product not found")
+	
+	# Handle new image upload if provided
+	if product_photo:
+		try:
+			# Delete old image if exists
+			if db_product.product_photo:
+				delete_product_image(db_product.product_photo)
+			
+			# Upload new image
+			file_content = await product_photo.read()
+			content_type = get_content_type(product_photo.filename)
+			image_url = upload_product_image(file_content, product_photo.filename, content_type)
+			db_product.product_photo = image_url
+		except Exception as e:
+			raise HTTPException(
+				status_code=500,
+				detail=f"Failed to upload image: {str(e)}"
+			)
+	
+	# Update other fields if provided
+	if product_name is not None:
+		db_product.product_name = product_name
+	if product_category is not None:
+		db_product.product_category = product_category
+	if product_price is not None:
+		db_product.product_price = product_price
+	if initial_stock is not None:
+		db_product.initial_stock = initial_stock
+	
+	db.add(db_product)
+	db.commit()
+	db.refresh(db_product)
+	
+	return db_product
+
+
+@app.delete("/products/{product_id}", status_code=204)
+async def delete_product(
+	product_id: int,
+	db: Session = Depends(get_db),
+	current_admin: User = Depends(get_admin_user),
+):
+	"""Delete a product and its associated image"""
+	_ = current_admin
+	
+	db_product = db.query(Product).filter(Product.id == product_id).first()
+	
+	if not db_product:
+		raise HTTPException(status_code=404, detail="Product not found")
+	
+	# Delete image from Supabase if exists
+	if db_product.product_photo:
+		delete_product_image(db_product.product_photo)
+	
+	db.delete(db_product)
+	db.commit()
+	
+	return None

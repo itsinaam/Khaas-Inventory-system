@@ -3,3 +3,5 @@ uvicorn==0.46.0
 SQLAlchemy==2.0.49
 python-dotenv==1.2.2
 psycopg2-binary==2.9.12
+supabase==2.31.0
+python-multipart==0.0.20
